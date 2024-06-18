@@ -19,34 +19,24 @@ const char* const* ruapu_rua();
 
 #ifdef RUAPU_IMPLEMENTATION
 
+#include <stdint.h>
+#include <string.h>
+
+typedef void (*ruapu_some_inst)();
+
 #if defined _WIN32
 
 #include <windows.h>
 #include <setjmp.h>
-#include <string.h>
 
-#if WINAPI_FAMILY == WINAPI_FAMILY_APP
-// uwp does not support veh  :(
-#if defined (_MSC_VER)
-#pragma message("warning: ruapu does not support UWP yet.")
-#else
-#warning ruapu does not support UWP yet.
-#endif
-static int ruapu_detect_isa(const void* some_inst)
-{
-    (void)some_inst;
-    return 0;
-}
-#else // WINAPI_FAMILY == WINAPI_FAMILY_APP
-typedef const void* ruapu_some_inst;
 #if defined (_MSC_VER) // MSVC
-static int ruapu_detect_isa(const void* some_inst)
+static int ruapu_detect_isa(ruapu_some_inst some_inst)
 {
     int g_ruapu_sigill_caught = 0;
 
     __try
     {
-        ((void (*)())some_inst)();
+        some_inst();
     }
     __except (GetExceptionCode() == EXCEPTION_ILLEGAL_INSTRUCTION ?
         EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
@@ -71,7 +61,7 @@ static LONG CALLBACK ruapu_catch_sigill(struct _EXCEPTION_POINTERS* ExceptionInf
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-static int ruapu_detect_isa(const void* some_inst)
+static int ruapu_detect_isa(ruapu_some_inst some_inst)
 {
     g_ruapu_sigill_caught = 0;
 
@@ -79,25 +69,21 @@ static int ruapu_detect_isa(const void* some_inst)
 
     if (setjmp(g_ruapu_jmpbuf) == 0)
     {
-        ((void (*)())some_inst)();
+        some_inst();
     }
 
     RemoveVectoredExceptionHandler(eh);
 
     return g_ruapu_sigill_caught ? 0 : 1;
 }
-#endif
 #endif // WINAPI_FAMILY == WINAPI_FAMILY_APP
 
 #elif defined __ANDROID__ || defined __linux__ || defined __APPLE__ || defined __FreeBSD__ || defined __NetBSD__ || defined __OpenBSD__ || defined __DragonFly__ || defined __sun__
 #include <signal.h>
 #include <setjmp.h>
-#include <string.h>
 
 static int g_ruapu_sigill_caught = 0;
 static sigjmp_buf g_ruapu_jmpbuf;
-
-typedef void (*ruapu_some_inst)();
 
 static void ruapu_catch_sigill(int signo, siginfo_t* si, void* data)
 {
@@ -131,7 +117,6 @@ static int ruapu_detect_isa(ruapu_some_inst some_inst)
 
 #elif defined __SYTERKIT__
 
-typedef void (*ruapu_some_inst)();
 #include <mmu.h>
 
 static int g_ruapu_sigill_caught = 0;
@@ -322,9 +307,18 @@ RUAPU_INSTCODE(a, 0x100122af, 0x185122af) // lr.w t0,(sp) + sc.w t0,t0,(sp)
 RUAPU_INSTCODE(f, 0x10a57553) // fmul.s fa0,fa0,fa0
 RUAPU_INSTCODE(d, 0x12a57553) // fmul.d fa0,fa0,fa0
 RUAPU_INSTCODE(c, 0x0001952a) // add a0,a0,a0 + nop
+RUAPU_INSTCODE(zba, 0x20a52533) // sh1add a0,a0,a0
+RUAPU_INSTCODE(zbb, 0x60451513) // sext.b a0,a0,a0
+RUAPU_INSTCODE(zbc, 0x0aa52533) // clmulr a0,a0,a0
+RUAPU_INSTCODE(zbs, 0x48a51533) // bclr a0,a0,a0
+RUAPU_INSTCODE(zbkb, 0x08a54533) // pack a0,a0,a0
+RUAPU_INSTCODE(zbkc, 0x0aa53533) // clmulh a0,a0,a0
+RUAPU_INSTCODE(zbkx, 0x28a52533) // xperm.n a0,a0,a0
 RUAPU_INSTCODE(zfa, 0xf0108053) // fli.s ft0, min
+RUAPU_INSTCODE(zfbfmin, 0x44807053) // fcvt.bf16.s ft0,ft0
 RUAPU_INSTCODE(zfh, 0x04007053); // fadd.hs ft0, ft0, ft0
 RUAPU_INSTCODE(zfhmin, 0xe4000553) // fmv.x.h a0, ft0
+RUAPU_INSTCODE(zicond, 0x0ea55533) // czero.eqz a0,a0,a0
 RUAPU_INSTCODE(zicsr, 0xc0102573); // csrr a0, time
 RUAPU_INSTCODE(zifencei, 0x0000100f); // fence.i
 RUAPU_INSTCODE(zmmul, 0x02a50533) // mul a0,a0,a0
@@ -341,6 +335,52 @@ RUAPU_INSTCODE(xtheadmempair, 0xe0a1450b) // th.lwd a0,a0,(sp),#0,3
 RUAPU_INSTCODE(xtheadsync, 0x0180000b) // th.sync
 RUAPU_INSTCODE(xtheadvdot, 0x8000600b) // th.vmaqa.vv v0,v0,v0
 
+RUAPU_INSTCODE(spacemitvmadot, 0xe200312b) // vmadot v2,v0,v0
+RUAPU_INSTCODE(spacemitvmadotn, 0xe600b12b) // vmadot3 v2,v0,v1 //vmadot2 vmadot1
+RUAPU_INSTCODE(spacemitvfmadot, 0xea00012b) // vfmadot v2,v0,v0
+
+// RVV 1.0 support
+// unimp (csrrw x0, cycle, x0)
+#define RUAPU_RV_TRAP() asm volatile(".align 2\n.word 0xc0001073")
+// vcsr is only defined in rvv 1.0, which doesn't exist in rvv 0.7.1 or xtheadvector.
+// csrr x0, vcsr
+#define RUAPU_RVV1P0_AVAIL() asm volatile(".align 2\n.word 0x00f02573")
+// csrr res, vlenb
+#define RUAPU_DETECT_ZVL(len) static void ruapu_some_zvl##len##b() { \
+        RUAPU_RVV1P0_AVAIL(); \
+        intptr_t res; \
+        asm volatile(".align 2\n.insn i 0x73, 0x2, %0, x0, -990" : "=r"(res)); \
+        if (res < len/8) RUAPU_RV_TRAP(); \
+    }
+RUAPU_DETECT_ZVL(32)
+RUAPU_DETECT_ZVL(64)
+RUAPU_DETECT_ZVL(128)
+RUAPU_DETECT_ZVL(256)
+RUAPU_DETECT_ZVL(512)
+RUAPU_DETECT_ZVL(1024)
+#undef RUAPU_DETECT_ZVL
+// vsetvl res, zero, vtype
+// check vill bits after vsetvl
+#define RUAPU_RVV_INSTCODE(isa, vtype, ...) static void ruapu_some_##isa() { \
+        RUAPU_RVV1P0_AVAIL(); \
+        intptr_t res; \
+        asm volatile(".align 2\n.insn r 0x57, 0x7, 0x40, %0, x0, %1" : "=r"(res) : "r"(vtype)); \
+        if (res < 0) RUAPU_RV_TRAP(); \
+        asm volatile(".align 2\n.word " #__VA_ARGS__ ); \
+    }
+
+RUAPU_RVV_INSTCODE(zvbb, 0, 0x4a862257) // vclz.v v4, v8 with SEW = 8
+RUAPU_RVV_INSTCODE(zvbc, 0, 0x32842257) // vclmul.vv v4, v8, v8 with SEW = 8
+RUAPU_RVV_INSTCODE(zvfh, 8, 0x02841257) // vfadd.vv v4, v8, v8 with SEW = 16
+RUAPU_RVV_INSTCODE(zvfhmin, 8, 0x4a8a1257) // vfncvt.f.f.v v4, v8 with SEW = 16
+RUAPU_RVV_INSTCODE(zvfbfmin, 8, 0x4a8e9257) // vfncvtbf16.f.f.w v4, v8 with SEW = 16
+RUAPU_RVV_INSTCODE(zvfbfwma, 8, 0xee855257) // vfwmaccbf16.vf v4, fa0, v8 with SEW = 16
+RUAPU_RVV_INSTCODE(zvkb, 0, 0x56860257) // vrol.vv v4, v8, v12 with SEW = 8
+RUAPU_RVV_INSTCODE(v, 24, 0x22842257) // vaaddu.vv v4, v8, v8 with SEW = 64
+
+#undef RUAPU_RVV_INSTCODE
+#undef RUAPU_RV_TRAP
+#undef RUAPU_RVV1P0_AVAIL
 #endif
 
 #undef RUAPU_INSTCODE
@@ -351,7 +391,7 @@ struct ruapu_isa_entry
     ruapu_some_inst inst;
 };
 
-#define RUAPU_ISAENTRY(isa) { #isa, (ruapu_some_inst)ruapu_some_##isa },
+#define RUAPU_ISAENTRY(isa) { #isa, (ruapu_some_inst)(void*)ruapu_some_##isa },
 
 struct ruapu_isa_entry g_ruapu_isa_map[] = {
 
@@ -468,12 +508,35 @@ RUAPU_ISAENTRY(a)
 RUAPU_ISAENTRY(f)
 RUAPU_ISAENTRY(d)
 RUAPU_ISAENTRY(c)
+RUAPU_ISAENTRY(v)
+RUAPU_ISAENTRY(zba)
+RUAPU_ISAENTRY(zbb)
+RUAPU_ISAENTRY(zbc)
+RUAPU_ISAENTRY(zbs)
+RUAPU_ISAENTRY(zbkb)
+RUAPU_ISAENTRY(zbkc)
+RUAPU_ISAENTRY(zbkx)
 RUAPU_ISAENTRY(zfa)
+RUAPU_ISAENTRY(zfbfmin)
 RUAPU_ISAENTRY(zfh)
 RUAPU_ISAENTRY(zfhmin)
+RUAPU_ISAENTRY(zicond)
 RUAPU_ISAENTRY(zicsr)
 RUAPU_ISAENTRY(zifencei)
 RUAPU_ISAENTRY(zmmul)
+RUAPU_ISAENTRY(zvbb)
+RUAPU_ISAENTRY(zvbc)
+RUAPU_ISAENTRY(zvfh)
+RUAPU_ISAENTRY(zvfhmin)
+RUAPU_ISAENTRY(zvfbfmin)
+RUAPU_ISAENTRY(zvfbfwma)
+RUAPU_ISAENTRY(zvkb)
+RUAPU_ISAENTRY(zvl32b)
+RUAPU_ISAENTRY(zvl64b)
+RUAPU_ISAENTRY(zvl128b)
+RUAPU_ISAENTRY(zvl256b)
+RUAPU_ISAENTRY(zvl512b)
+RUAPU_ISAENTRY(zvl1024b)
 
 RUAPU_ISAENTRY(xtheadba)
 RUAPU_ISAENTRY(xtheadbb)
@@ -486,6 +549,10 @@ RUAPU_ISAENTRY(xtheadmemidx)
 RUAPU_ISAENTRY(xtheadmempair)
 RUAPU_ISAENTRY(xtheadsync)
 RUAPU_ISAENTRY(xtheadvdot)
+
+RUAPU_ISAENTRY(spacemitvmadot)
+RUAPU_ISAENTRY(spacemitvmadotn)
+RUAPU_ISAENTRY(spacemitvfmadot)
 
 #elif __openrisc__
 RUAPU_ISAENTRY(orbis32)
